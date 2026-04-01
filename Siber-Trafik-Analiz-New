@@ -1,0 +1,243 @@
+import os
+import requests
+from scapy.all import *
+from scapy.layers.http import HTTPRequest
+from scapy.layers.inet import IP, TCP, UDP, ICMP
+from scapy.layers.l2 import ARP
+from scapy.layers.dns import DNS, DNSQR
+from scapy.error import Scapy_Exception
+import tkinter as tk
+from tkinter import filedialog, ttk, scrolledtext, messagebox
+from datetime import datetime
+
+paketler = []
+aktif_paketler = []
+
+# -----------------------------
+# Paket Payload Okuma
+# -----------------------------
+def paket_icerigini_oku(pkt):
+    if pkt.haslayer(Raw):
+        payload = pkt[Raw].load
+        try:
+            return payload.decode('utf-8', errors='ignore')
+        except:
+            return str(payload)
+    return None
+
+# -----------------------------
+# MAC Adresinden Üretici Bulma
+# -----------------------------
+def mac_ureticisi_bul(mac):
+    try:
+        url = f"https://api.macvendors.com/{mac}"
+        response = requests.get(url, timeout=2)
+        if response.status_code == 200:
+            return response.text
+        return "Bilinmeyen üretici"
+    except:
+        return "Bilinmeyen üretici"
+
+# -----------------------------
+# Analiz Notu (Kritik Veri)
+# -----------------------------
+def analiz_notu_yaz(kategori, ip, aciklama, pkt_idx, seviye="KRITIK"):
+    zaman = datetime.now().strftime("%H:%M:%S")
+    tag_name = f"pkt_{pkt_idx}"
+    if seviye == "KRITIK":
+        baslik = f"{'!'*5} KRİTİK VERİ {'!'*5}"
+        renk = "#ff4444"
+    else:
+        baslik = f"--- {kategori.upper()} ---"
+        renk = "#00ff9c"
+    log = f"{baslik}\nZAMAN     : {zaman}\nKAYNAK IP : {ip}\nAÇIKLAMA  : {aciklama}\n{'-'*50}\n"
+    hassas_alani.insert(tk.END, log, tag_name)
+    hassas_alani.tag_configure(tag_name, foreground=renk)
+    hassas_alani.tag_bind(tag_name, "<Button-1>", lambda e, idx=pkt_idx: paket_sec_ve_odakla(idx))
+    hassas_alani.see(tk.END)
+
+# -----------------------------
+# Paket Seçip Odaklama
+# -----------------------------
+def paket_sec_ve_odakla(idx):
+    try:
+        liste.selection_set(str(idx))
+        liste.focus(str(idx))
+        liste.see(str(idx))
+        paket_detay(None)
+    except:
+        pass
+
+# -----------------------------
+# PCAP Dosyası Seç ve Güvenli Oku
+# -----------------------------
+def dosya_sec():
+    global paketler, aktif_paketler
+    file = filedialog.askopenfilename(filetypes=[("PCAP Dosyaları", "*.pcap *.pcapng")])
+    if not file: return
+    try:
+        paketler = rdpcap(file)
+        aktif_paketler = paketler
+        listeyi_doldur()
+        analiz_yap()
+    except Scapy_Exception as se:
+        messagebox.showerror("Hata", f"Scapy dosya okuma hatası:\n{str(se)}\nDosya bozuk veya desteklenmeyen formatta olabilir.")
+    except Exception as e:
+        messagebox.showerror("Hata", f"Dosya okuma hatası: {str(e)}")
+    else:
+        messagebox.showinfo("Başarılı", f"{len(aktif_paketler)} paket yüklendi.")
+
+# -----------------------------
+# Treeview Doldur
+# -----------------------------
+def listeyi_doldur():
+    liste.delete(*liste.get_children())
+    for i, pkt in enumerate(aktif_paketler):
+        proto = "OTHER"
+        if pkt.haslayer(TCP): proto = "TCP"
+        elif pkt.haslayer(UDP): proto = "UDP"
+        elif pkt.haslayer(ICMP): proto = "ICMP"
+        elif pkt.haslayer(DNS): proto = "DNS"
+        elif pkt.haslayer(ARP): proto = "ARP"
+        src = pkt[IP].src if pkt.haslayer(IP) else (pkt[ARP].psrc if pkt.haslayer(ARP) else "?")
+        dst = pkt[IP].dst if pkt.haslayer(IP) else (pkt[ARP].pdst if pkt.haslayer(ARP) else "?")
+        liste.insert("", "end", iid=i, values=(i, proto, src, dst, pkt.summary()))
+
+# -----------------------------
+# Paket Detay Göster
+# -----------------------------
+def paket_detay(event):
+    secilen = liste.focus()
+    if not secilen: return
+    idx = int(secilen)
+    pkt = aktif_paketler[idx]
+    detay_alani.delete(1.0, tk.END)
+    detay_alani.insert(tk.END, pkt.show(dump=True) + "\n")
+    icerik = paket_icerigini_oku(pkt)
+    if icerik:
+        detay_alani.insert(tk.END, "\n" + "="*50 + "\n")
+        detay_alani.insert(tk.END, " YAKALANAN ŞİFRESİZ VERİ (PAYLOAD):\n")
+        detay_alani.insert(tk.END, "="*50 + "\n")
+        detay_alani.insert(tk.END, icerik.strip() + "\n")
+        detay_alani.insert(tk.END, "\n" + "="*50 + "\n")
+        detay_alani.insert(tk.END, " HEX DÖKÜMÜ:\n")
+        detay_alani.insert(tk.END, hexdump(pkt[Raw].load, dump=True) if pkt.haslayer(Raw) else "Yok\n")
+
+# -----------------------------
+# Akış Alanına Yaz
+# -----------------------------
+def akis_yaz(metin, pkt_idx):
+    tag_name = f"pkt_{pkt_idx}"
+    sonuc_alani.insert(tk.END, metin + "\n", tag_name)
+    sonuc_alani.tag_bind(tag_name, "<Button-1>", lambda e, idx=pkt_idx: paket_sec_ve_odakla(idx))
+
+# -----------------------------
+# Analiz Yap
+# -----------------------------
+def analiz_yap():
+    sonuc_alani.delete(1.0, tk.END)
+    hassas_alani.delete(1.0, tk.END)
+    hassas_alani.insert(tk.END, f"--- AKILLI ANALİZ RAPORU ({datetime.now().strftime('%H:%M')}) ---\n\n")
+    for i, paket in enumerate(aktif_paketler):
+        ip_src = paket[IP].src if paket.haslayer(IP) else "Bilinmiyor"
+        # HTTP
+        if http_var.get() and paket.haslayer(HTTPRequest):
+            host = paket[HTTPRequest].Host.decode(errors='ignore') if paket[HTTPRequest].Host else "Bilinmiyor"
+            raw_data = paket_icerigini_oku(paket)
+            if raw_data and any(k in raw_data.lower() for k in ["user", "pass", "login", "password"]):
+                analiz_notu_yaz("KRITIK VERI", ip_src, f"Gönderilen Bilgi: {raw_data.strip()[:150]}", i, "KRITIK")
+            akis_yaz(f"[HTTP] {ip_src} -> {host}", i)
+        # DNS
+        if dns_var.get() and paket.haslayer(DNSQR):
+            query = paket[DNSQR].qname.decode(errors='ignore')
+            analiz_notu_yaz("DNS SORGUSU", ip_src, f"Cihaz {query} adresini çözümlüyor.", i)
+            akis_yaz(f"[DNS] {ip_src} -> {query}", i)
+        # ARP
+        if arp_var.get() and paket.haslayer(ARP):
+            ip_arp = paket[ARP].psrc
+            mac_arp = paket[ARP].hwsrc
+            uretici = mac_ureticisi_bul(mac_arp)
+            analiz_notu_yaz("YEREL KESIF", ip_arp, f"Ağdaki cihazı soruyor.\nIP: {ip_arp}\nMAC: {mac_arp}\nÜretici: {uretici}", i)
+            akis_yaz(f"[ARP] {ip_arp} ({mac_arp} - {uretici})", i)
+        # ICMP
+        if icmp_var.get() and paket.haslayer(ICMP):
+            akis_yaz(f"[ICMP] {ip_src} -> {paket[IP].dst if paket.haslayer(IP) else '?'}", i)
+        # TCP
+        if tcp_var.get() and paket.haslayer(TCP):
+            akis_yaz(f"[TCP] {ip_src} -> {paket[IP].dst if paket.haslayer(IP) else '?'}", i)
+        # UDP
+        if udp_var.get() and paket.haslayer(UDP):
+            akis_yaz(f"[UDP] {ip_src} -> {paket[IP].dst if paket.haslayer(IP) else '?'}", i)
+        # SMTP
+        if smtp_var.get() and paket.haslayer(TCP) and paket[TCP].dport == 25:
+            akis_yaz(f"[SMTP] {ip_src} -> {paket[IP].dst if paket.haslayer(IP) else '?'}", i)
+        # FTP
+        if ftp_var.get() and paket.haslayer(TCP) and paket[TCP].dport in [20,21]:
+            akis_yaz(f"[FTP] {ip_src} -> {paket[IP].dst if paket.haslayer(IP) else '?'}", i)
+
+# -----------------------------
+# GUI Başlat
+# -----------------------------
+root = tk.Tk()
+root.title("Gelişmiş Trafik Analiz Aracı v4 - Yeşil Tema")
+root.geometry("1300x850")
+root.configure(bg="#1e1e1e")
+
+top_frame = tk.Frame(root, bg="#1e1e1e")
+top_frame.pack(fill=tk.X)
+btn_style = {"bg": "#333", "fg": "white", "activebackground": "#555", "bd": 0, "padx": 10, "pady": 2}
+tk.Button(top_frame, text="PCAP Aç", command=dosya_sec, **btn_style).pack(side=tk.LEFT, padx=5, pady=10)
+arama_entry = tk.Entry(top_frame, bg="#222", fg="white", insertbackground="white", width=25)
+arama_entry.pack(side=tk.LEFT, padx=5, pady=10)
+
+# Filtreler
+http_var = tk.BooleanVar(value=True)
+dns_var = tk.BooleanVar(value=True)
+arp_var = tk.BooleanVar(value=True)
+icmp_var = tk.BooleanVar(value=True)
+tcp_var = tk.BooleanVar(value=True)
+udp_var = tk.BooleanVar(value=True)
+smtp_var = tk.BooleanVar(value=True)
+ftp_var = tk.BooleanVar(value=True)
+filtreler = [("HTTP", http_var), ("DNS", dns_var), ("ARP", arp_var), ("ICMP", icmp_var),
+             ("TCP", tcp_var), ("UDP", udp_var), ("SMTP", smtp_var), ("FTP", ftp_var)]
+for text,var in filtreler:
+    tk.Checkbutton(top_frame,text=text,variable=var,bg="#1e1e1e",fg="#00ff9c",
+                   selectcolor="#1e1e1e", activebackground="#1e1e1e",
+                   activeforeground="#00ff9c", font=("Arial",10,"bold")).pack(side=tk.LEFT,padx=5)
+tk.Button(top_frame, text="Analizi Yenile", command=analiz_yap, **btn_style).pack(side=tk.LEFT,padx=10)
+
+# Treeview
+columns = ("No", "Proto", "Source", "Destination", "Summary")
+style = ttk.Style()
+style.theme_use("clam")
+style.configure("Treeview", background="#2b2b2b", foreground="white", fieldbackground="#2b2b2b", borderwidth=0)
+style.map("Treeview", background=[('selected','#00553a')])
+liste = ttk.Treeview(root, columns=columns, show="headings", height=12)
+for col in columns:
+    liste.heading(col, text=col)
+    liste.column(col, width=100 if col!="Summary" else 650)
+liste.pack(fill=tk.X, padx=10, pady=5)
+liste.bind("<<TreeviewSelect>>", paket_detay)
+
+# Etiketler
+label_frame = tk.Frame(root,bg="#1e1e1e")
+label_frame.pack(fill=tk.X)
+tk.Label(label_frame,text="PAKET AYRINTILARI / VERİ (OKUNABİLİR)",bg="#1e1e1e",fg="#00ff9c",
+         font=("Arial",9,"bold")).pack(side=tk.LEFT,expand=True)
+tk.Label(label_frame,text="PROTOKOL AKIŞI (TIKLANABİLİR)",bg="#1e1e1e",fg="#00ff9c",
+         font=("Arial",9,"bold")).pack(side=tk.LEFT,expand=True)
+tk.Label(label_frame,text="KRİTİK VERİLER",bg="#1e1e1e",fg="#00ff9c",
+         font=("Arial",9,"bold")).pack(side=tk.LEFT,expand=True)
+
+# Alt Frame
+bottom_frame = tk.Frame(root,bg="#1e1e1e")
+bottom_frame.pack(fill=tk.BOTH,expand=True)
+detay_alani = scrolledtext.ScrolledText(bottom_frame,width=40,bg="#0a0a0a",fg="#00ff9c",font=("Consolas",10))
+detay_alani.pack(side=tk.LEFT,fill=tk.BOTH,expand=True,padx=5,pady=5)
+sonuc_alani = scrolledtext.ScrolledText(bottom_frame,width=35,bg="#0a0a0a",fg="#00bfff",font=("Consolas",10),cursor="hand2")
+sonuc_alani.pack(side=tk.LEFT,fill=tk.BOTH,expand=True,padx=5,pady=5)
+hassas_alani = scrolledtext.ScrolledText(bottom_frame,width=45,bg="#0a0a0a",fg="#ff4444",font=("Consolas",10),cursor="hand2")
+hassas_alani.pack(side=tk.RIGHT,fill=tk.BOTH,expand=True,padx=5,pady=5)
+
+root.mainloop()
